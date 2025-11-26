@@ -227,15 +227,22 @@ const TourMap: React.FC<TourMapProps> = ({ tour, activeStopId, onStopClick, user
     <div className="relative w-full h-full min-h-[400px] rounded-lg overflow-hidden bg-gray-900 border border-gray-700 shadow-inner z-0">
       <div ref={mapContainerRef} className="absolute inset-0 z-0" />
       
-      {userLocation && (
-        <button 
-            onClick={handleShowMe}
-            className="absolute bottom-6 right-6 z-[400] bg-gray-800 hover:bg-gray-700 text-white p-3 rounded-full shadow-lg border border-gray-600 transition-all focus:outline-none focus:ring-2 focus:ring-primary group"
-            title="Show my location"
-        >
-            <i className="fa-solid fa-location-crosshairs text-lg text-primary group-hover:scale-110 transition-transform"></i>
-        </button>
-      )}
+      <button 
+          onClick={handleShowMe}
+          disabled={!userLocation}
+          className={`absolute bottom-6 right-6 z-[1000] w-12 h-12 flex items-center justify-center rounded-full shadow-lg border transition-all focus:outline-none group
+            ${userLocation 
+                ? 'bg-gray-800 border-gray-600 hover:bg-gray-700 text-white cursor-pointer' 
+                : 'bg-gray-800/80 border-gray-700 text-gray-400 cursor-wait'
+            }`}
+          title={userLocation ? "Show my location" : "Locating GPS..."}
+      >
+          {userLocation ? (
+             <i className="fa-solid fa-location-crosshairs text-xl text-primary group-hover:scale-110 transition-transform"></i>
+          ) : (
+             <i className="fa-solid fa-spinner fa-spin text-lg"></i>
+          )}
+      </button>
     </div>
   );
 };

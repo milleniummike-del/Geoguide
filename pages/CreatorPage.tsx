@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { User, Tour, TourStop, MediaType } from '../types';
+import React, { useState, useEffect, useRef } from 'react';
+import { User, Tour, TourStop, MediaType, GeoPoint } from '../types';
 import { storageService } from '../services/storageService';
 import TourMap from '../components/TourMap';
 import { generateStopDetailsJSON } from '../services/geminiService';
@@ -15,11 +15,83 @@ const CreatorPage: React.FC<CreatorPageProps> = ({ user }) => {
   const [isGenerating, setIsGenerating] = useState(false);
   const [uploadingState, setUploadingState] = useState<{[key: number]: boolean}>({});
   const [coverUploading, setCoverUploading] = useState(false);
+  const [userLocation, setUserLocation] = useState<GeoPoint | null>(null);
+  const [geoError, setGeoError] = useState<string | null>(null);
+  const watchIdRef = useRef<number | null>(null);
 
   // Load user's tours
   useEffect(() => {
     loadTours();
   }, []);
+
+  // Track Location Logic
+  const startLocationTracking = (highAccuracy = true) => {
+    if (watchIdRef.current !== null) {
+        navigator.geolocation.clearWatch(watchIdRef.current);
+    }
+
+    if (!navigator.geolocation) {
+      setGeoError("Geolocation not supported");
+      return;
+    }
+
+    setGeoError(null);
+    const options = {
+        enableHighAccuracy: highAccuracy,
+        timeout: 10000,
+        maximumAge: 5000
+    };
+
+    watchIdRef.current = navigator.geolocation.watchPosition(
+      (pos) => {
+        setGeoError(null);
+        setUserLocation({
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude
+        });
+      },
+      (err) => {
+        console.warn("Geo error:", err);
+        let msg = "Location unavailable";
+        if (err.code === 1) msg = "Permission denied";
+        else if (err.code === 2) msg = "Signal unavailable";
+        else if (err.code === 3) msg = "Timeout";
+        setGeoError(msg);
+      },
+      options
+    );
+  };
+
+  // Initial tracking attempt on mount
+  useEffect(() => {
+    startLocationTracking(true);
+    return () => {
+        if (watchIdRef.current !== null) {
+            navigator.geolocation.clearWatch(watchIdRef.current);
+        }
+    };
+  }, []);
+
+  const handleRetryLocation = () => {
+      // User gesture allows for permission prompt
+      setGeoError("Requesting permission...");
+      navigator.geolocation.getCurrentPosition(
+          (pos) => {
+              // If successful, start watching with high accuracy
+              setUserLocation({
+                  lat: pos.coords.latitude,
+                  lng: pos.coords.longitude
+              });
+              startLocationTracking(true);
+          },
+          (err) => {
+              console.warn("Retry failed, trying low accuracy", err);
+              // Fallback to low accuracy if high failed
+              startLocationTracking(false);
+          },
+          { enableHighAccuracy: true, timeout: 5000 }
+      );
+  };
 
   const loadTours = async () => {
     const allTours = await storageService.getTours();
@@ -72,15 +144,16 @@ const CreatorPage: React.FC<CreatorPageProps> = ({ user }) => {
 
   // --- Stop Management ---
 
-  // Use functional updates to avoid stale state issues during async ops
   const addStop = () => {
     setEditingTour(prev => {
       if (!prev) return null;
+      const initialLocation = userLocation ? { ...userLocation } : { ...DEFAULT_COORDS };
+      
       const newStop: TourStop = {
-        id: `stop-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`, // Robust ID
+        id: `stop-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
         title: 'New Stop',
         description: '',
-        location: { ...DEFAULT_COORDS },
+        location: initialLocation,
         mediaType: MediaType.NONE
       };
       return {
@@ -143,6 +216,15 @@ const CreatorPage: React.FC<CreatorPageProps> = ({ user }) => {
     }
   };
 
+  const setStopToCurrentLocation = (index: number) => {
+    if (userLocation) {
+        updateStop(index, { location: { ...userLocation } });
+    } else {
+        // Trigger a retry if they click this and location isn't ready
+        handleRetryLocation();
+    }
+  };
+
   if (editingTour) {
     return (
       <div className="space-y-6">
@@ -173,7 +255,6 @@ const CreatorPage: React.FC<CreatorPageProps> = ({ user }) => {
                {/* Cover Image */}
                <div>
                     <label className="block text-sm font-medium text-gray-400 mb-1">Cover Image</label>
-                    {/* Preview */}
                     {editingTour.coverUrl && (
                         <div className="relative mb-2 group">
                              <img src={editingTour.coverUrl} alt="Cover" className="h-40 w-full object-cover rounded-md border border-gray-700" />
@@ -258,25 +339,36 @@ const CreatorPage: React.FC<CreatorPageProps> = ({ user }) => {
                                 </div>
                             </div>
 
-                            <div className="grid grid-cols-2 gap-2">
-                                <div>
-                                    <label className="text-xs text-gray-500 uppercase">Lat</label>
-                                    <input 
-                                        type="number" step="0.0001"
-                                        className="w-full bg-gray-900 border border-gray-700 rounded p-2 text-sm"
-                                        value={stop.location.lat}
-                                        onChange={(e) => updateStop(idx, { location: { ...stop.location, lat: parseFloat(e.target.value) } })}
-                                    />
+                            <div>
+                                <div className="grid grid-cols-2 gap-2">
+                                    <div>
+                                        <label className="text-xs text-gray-500 uppercase">Lat</label>
+                                        <input 
+                                            type="number" step="0.0001"
+                                            className="w-full bg-gray-900 border border-gray-700 rounded p-2 text-sm"
+                                            value={stop.location.lat}
+                                            onChange={(e) => updateStop(idx, { location: { ...stop.location, lat: parseFloat(e.target.value) } })}
+                                        />
+                                    </div>
+                                    <div>
+                                        <label className="text-xs text-gray-500 uppercase">Lng</label>
+                                        <input 
+                                            type="number" step="0.0001"
+                                            className="w-full bg-gray-900 border border-gray-700 rounded p-2 text-sm"
+                                            value={stop.location.lng}
+                                            onChange={(e) => updateStop(idx, { location: { ...stop.location, lng: parseFloat(e.target.value) } })}
+                                        />
+                                    </div>
                                 </div>
-                                <div>
-                                    <label className="text-xs text-gray-500 uppercase">Lng</label>
-                                    <input 
-                                        type="number" step="0.0001"
-                                        className="w-full bg-gray-900 border border-gray-700 rounded p-2 text-sm"
-                                        value={stop.location.lng}
-                                        onChange={(e) => updateStop(idx, { location: { ...stop.location, lng: parseFloat(e.target.value) } })}
-                                    />
-                                </div>
+                                <button 
+                                    onClick={() => setStopToCurrentLocation(idx)}
+                                    className={`w-full mt-2 bg-gray-700 hover:bg-gray-600 text-xs text-gray-300 py-1 rounded flex items-center justify-center transition`}
+                                    title={userLocation ? "Set to current GPS location" : `GPS Unavailable: ${geoError || "Locating..."}`}
+                                >
+                                    {userLocation ? <i className="fa-solid fa-location-crosshairs mr-1"></i> : <i className="fa-solid fa-spinner fa-spin mr-1"></i>}
+                                    {userLocation ? "Use Current Location" : geoError ? "Retry GPS" : "Locating..."}
+                                </button>
+                                {geoError && !userLocation && <div className="text-xs text-red-400 mt-1 text-center">{geoError}</div>}
                             </div>
 
                             <div>
@@ -288,7 +380,6 @@ const CreatorPage: React.FC<CreatorPageProps> = ({ user }) => {
                                 />
                             </div>
 
-                            {/* Media Section */}
                             <div>
                                 <label className="text-xs text-gray-500 uppercase block mb-1">Media Attachment</label>
                                 <div className="flex flex-col space-y-2">
@@ -324,7 +415,6 @@ const CreatorPage: React.FC<CreatorPageProps> = ({ user }) => {
                                                 {uploadingState[idx] && <i className="fa-solid fa-spinner fa-spin text-primary"></i>}
                                              </div>
                                              
-                                             {/* Preview */}
                                              {stop.mediaUrl && !uploadingState[idx] && (
                                                  <div className="mt-2 p-1 bg-black rounded border border-gray-800 flex justify-center">
                                                     {stop.mediaType === MediaType.IMAGE && (
@@ -352,7 +442,20 @@ const CreatorPage: React.FC<CreatorPageProps> = ({ user }) => {
           <div className="sticky top-24">
              <div className="bg-gray-800 p-4 rounded-lg border border-gray-700">
                  <h3 className="text-lg font-semibold mb-4 text-gray-300">Route Preview</h3>
-                 <TourMap tour={editingTour} />
+                 <TourMap tour={editingTour} userLocation={userLocation} />
+                 {geoError && (
+                    <div className="mt-2 text-center flex items-center justify-center space-x-2">
+                        <span className="text-xs text-red-400 bg-red-900/20 border border-red-800 px-2 py-1 rounded">
+                            <i className="fa-solid fa-triangle-exclamation mr-1"></i> {geoError}
+                        </span>
+                        <button 
+                            onClick={handleRetryLocation} 
+                            className="text-xs bg-gray-700 hover:bg-gray-600 text-white px-2 py-1 rounded transition"
+                        >
+                            Retry GPS
+                        </button>
+                    </div>
+                 )}
                  <p className="mt-4 text-sm text-gray-500 text-center">
                     Visual representation of your stops relative to each other.
                  </p>

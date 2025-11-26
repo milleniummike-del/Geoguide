@@ -3,7 +3,7 @@
 // Feature Switch: Set to true to use the Node API, false for LocalStorage
 export const USE_REMOTE_API = true; 
 
-export const API_BASE_URL = 'http://localhost:3002/api'; // Port 3002 for Backend
+export const API_BASE_URL = 'https://geoguide-456850480610.europe-west1.run.app/api'; // Port 3002 for Backend
 
 // REPLACE WITH YOUR REAL GOOGLE CLIENT ID FROM GOOGLE CLOUD CONSOLE
 // Example: '1234567890-abcdefg.apps.googleusercontent.com'

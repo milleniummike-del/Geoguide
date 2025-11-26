@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Tour, GeoPoint, TourStop, MediaType } from '../types';
 import { storageService } from '../services/storageService';
 import TourMap from '../components/TourMap';
@@ -10,25 +10,74 @@ const ConsumerPage: React.FC = () => {
   const [activeStopId, setActiveStopId] = useState<string | undefined>(undefined);
   const [userLocation, setUserLocation] = useState<GeoPoint | null>(null);
   const [audioLoading, setAudioLoading] = useState(false);
+  const [geoError, setGeoError] = useState<string | null>(null);
+  const watchIdRef = useRef<number | null>(null);
 
   useEffect(() => {
     storageService.getTours().then(setTours);
-    
-    // Track Location
-    if (navigator.geolocation) {
-      const id = navigator.geolocation.watchPosition(
-        (pos) => {
-          setUserLocation({
-            lat: pos.coords.latitude,
-            lng: pos.coords.longitude
-          });
-        },
-        (err) => console.error("Geo error:", err),
-        { enableHighAccuracy: true }
-      );
-      return () => navigator.geolocation.clearWatch(id);
-    }
+    startLocationTracking(true);
+
+    return () => {
+        if (watchIdRef.current !== null) {
+            navigator.geolocation.clearWatch(watchIdRef.current);
+        }
+    };
   }, []);
+
+  const startLocationTracking = (highAccuracy = true) => {
+    if (watchIdRef.current !== null) {
+        navigator.geolocation.clearWatch(watchIdRef.current);
+    }
+
+    if (!navigator.geolocation) {
+        setGeoError("Geolocation not supported");
+        return;
+    }
+    
+    setGeoError(null);
+    const options = {
+        enableHighAccuracy: highAccuracy,
+        timeout: 10000,
+        maximumAge: 5000
+    };
+
+    watchIdRef.current = navigator.geolocation.watchPosition(
+      (pos) => {
+        setGeoError(null);
+        setUserLocation({
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude
+        });
+      },
+      (err) => {
+        console.warn("Geo error:", err);
+        let msg = "Locating failed";
+        if (err.code === 1) msg = "Permission Denied";
+        else if (err.code === 2) msg = "Unavailable";
+        else if (err.code === 3) msg = "Timeout";
+        setGeoError(msg);
+      },
+      options
+    );
+  };
+
+  const handleRetryLocation = () => {
+      setGeoError("Requesting permission...");
+      navigator.geolocation.getCurrentPosition(
+          (pos) => {
+              setUserLocation({
+                  lat: pos.coords.latitude,
+                  lng: pos.coords.longitude
+              });
+              startLocationTracking(true);
+          },
+          (err) => {
+              console.warn("Retry failed, using low accuracy", err);
+              startLocationTracking(false);
+          },
+          { enableHighAccuracy: true, timeout: 5000 }
+      );
+  };
 
   const startTour = (tour: Tour) => {
     setActiveTour(tour);
@@ -53,8 +102,6 @@ const ConsumerPage: React.FC = () => {
   if (activeTour) {
     const activeStop = activeTour.stops.find(s => s.id === activeStopId);
     
-    // Determine next stop logic (simple distance check could go here)
-    
     return (
       <div className="flex flex-col h-[calc(100vh-100px)]">
         <div className="mb-4 flex items-center space-x-4">
@@ -77,7 +124,17 @@ const ConsumerPage: React.FC = () => {
                 </div>
                 <div className="p-4 bg-gray-900 border-t border-gray-700 flex justify-between items-center text-sm text-gray-400">
                     <span><i className="fa-solid fa-location-dot mr-1"></i> {activeTour.stops.length} Stops</span>
-                    <span><i className="fa-solid fa-person-walking mr-1"></i> {userLocation ? "Location Active" : "Locating..."}</span>
+                    <div className="flex items-center space-x-2">
+                        <span className={geoError ? "text-red-400 font-bold" : "text-gray-400"}>
+                            <i className={`fa-solid ${geoError ? 'fa-circle-exclamation' : 'fa-person-walking'} mr-1`}></i> 
+                            {userLocation ? "Location Active" : geoError || "Locating..."}
+                        </span>
+                        {geoError && (
+                            <button onClick={handleRetryLocation} className="text-xs bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded text-white transition">
+                                Retry
+                            </button>
+                        )}
+                    </div>
                 </div>
             </div>
 

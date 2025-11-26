@@ -2,18 +2,17 @@
 /**
  * GeoGuide AI Backend Server
  * 
- * SETUP INSTRUCTIONS:
- * 1. Install dependencies:
- *    npm install express cors multer @google-cloud/firestore @google-cloud/storage
+ * MODES:
+ * 1. LOCAL MODE (Default): Uses 'tours.json' and local 'uploads/' folder.
+ * 2. CLOUD MODE: Uses Google Firestore and Google Cloud Storage.
  * 
- * 2. Run the server (Local Mode):
- *    node backend/server.js
+ * TO ENABLE CLOUD MODE:
+ * 1. npm install @google-cloud/firestore @google-cloud/storage
+ * 2. Set env vars: GCP_PROJECT_ID and GCS_BUCKET_NAME
  * 
- * 3. Run the server (Google Cloud Mode):
- *    export GCP_PROJECT_ID="your-project-id"
- *    export GCS_BUCKET_NAME="your-bucket-name"
- *    # Ensure you have 'GOOGLE_APPLICATION_CREDENTIALS' set or are logged in via 'gcloud auth application-default login'
- *    node backend/server.js
+ * DEPLOYMENT NOTE (Vercel):
+ * Vercel has a read-only file system. Local Mode will NOT work for persistence.
+ * You MUST use Cloud Mode (set env vars in Vercel dashboard) for this to work in production.
  */
 
 const express = require('express');
@@ -22,250 +21,296 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 
-// Optional: Google Cloud Imports (Lazy loaded to prevent crash if not installed/used)
-let Firestore, Storage;
-try {
-  const firestoreLib = require('@google-cloud/firestore');
-  const storageLib = require('@google-cloud/storage');
-  Firestore = firestoreLib.Firestore;
-  Storage = storageLib.Storage;
-} catch (e) {
-  // Libraries not installed, will fallback to local only
-}
-
 const app = express();
-// Updated to 3002 to match constants.ts
 const PORT = process.env.PORT || 3002;
 
-// --- Feature Flags for Cloud Persistence ---
+// --- Configuration ---
 const PROJECT_ID = process.env.GCP_PROJECT_ID;
 const BUCKET_NAME = process.env.GCS_BUCKET_NAME;
+
+// Check if Cloud libraries are available
+let Firestore, Storage;
+try {
+    Firestore = require('@google-cloud/firestore').Firestore;
+    Storage = require('@google-cloud/storage').Storage;
+} catch (e) {
+    if (process.env.NODE_ENV !== 'production') {
+        console.warn("⚠️  Google Cloud libraries not found. Run 'npm install' to enable cloud features.");
+    }
+}
+
 const USE_CLOUD = !!(PROJECT_ID && BUCKET_NAME && Firestore && Storage);
-
-console.log('------------------------------------------------');
-if (USE_CLOUD) {
-    console.log(`☁️  GOOGLE CLOUD MODE ACTIVE`);
-    console.log(`   Project: ${PROJECT_ID}`);
-    console.log(`   Bucket:  ${BUCKET_NAME}`);
-} else {
-    console.log(`💻 LOCAL MODE ACTIVE`);
-    if (!Firestore) console.log(`   (Cloud libs not found. Run 'npm install @google-cloud/firestore @google-cloud/storage' to enable cloud features)`);
-    else if (!PROJECT_ID) console.log(`   (Missing GCP_PROJECT_ID env var)`);
-}
-console.log('------------------------------------------------');
-
-// --- Cloud Clients ---
-let db, bucket;
-if (USE_CLOUD) {
-    db = new Firestore({ projectId: PROJECT_ID });
-    const storage = new Storage({ projectId: PROJECT_ID });
-    bucket = storage.bucket(BUCKET_NAME);
-}
 
 // --- Middleware ---
 app.use(cors());
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// --- Request Logger ---
+// Request Logger
 app.use((req, res, next) => {
-  const start = Date.now();
-  res.on('finish', () => {
-    const duration = Date.now() - start;
-    console.log(`[${new Date().toISOString()}] ${req.method} ${req.url} ${res.statusCode} - ${duration}ms`);
-  });
-  next();
+    const start = Date.now();
+    res.on('finish', () => {
+        console.log(`[${new Date().toISOString()}] ${req.method} ${req.url} ${res.statusCode} - ${Date.now() - start}ms`);
+    });
+    next();
 });
 
-// --- Storage Configuration (Multer) ---
-// If Cloud: Use MemoryStorage to buffer file before streaming to GCS
-// If Local: Use DiskStorage to save directly to 'uploads' folder
-const UPLOADS_DIR = path.join(__dirname, 'uploads');
+// --- STRATEGY PATTERN: Data Providers ---
 
-if (!USE_CLOUD && !fs.existsSync(UPLOADS_DIR)) {
-  fs.mkdirSync(UPLOADS_DIR);
-}
+/**
+ * Strategy 1: Local File System Provider
+ * Persists data to tours.json and files to /uploads folder
+ */
+class LocalProvider {
+    constructor() {
+        this.dataFile = path.join(__dirname, 'tours.json');
+        // If on Vercel/Lambda, use /tmp for temporary storage to prevent crash on startup, 
+        // though data won't persist.
+        this.isServerless = process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_VERSION;
+        
+        this.uploadsDir = this.isServerless ? '/tmp/uploads' : path.join(__dirname, 'uploads');
+        this.localTours = [];
 
-const upload = multer({
-    storage: USE_CLOUD ? multer.memoryStorage() : multer.diskStorage({
-        destination: (req, file, cb) => cb(null, UPLOADS_DIR),
-        filename: (req, file, cb) => {
-            const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
-            cb(null, uniqueSuffix + path.extname(file.originalname));
-        }
-    })
-});
-
-// Serve local uploads statically if in local mode
-if (!USE_CLOUD) {
-    app.use('/uploads', express.static(UPLOADS_DIR));
-}
-
-// --- Data Access Layer (DAL) ---
-
-// Local In-Memory Cache
-const DATA_FILE = path.join(__dirname, 'tours.json');
-let localTours = [];
-
-if (!USE_CLOUD) {
-    if (fs.existsSync(DATA_FILE)) {
-        try {
-            localTours = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-        } catch (e) { localTours = []; }
-    }
-}
-
-const saveLocalData = () => {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(localTours, null, 2));
-};
-
-// DAL Methods
-const DAL = {
-    getAllTours: async () => {
-        if (USE_CLOUD) {
-            const snapshot = await db.collection('tours').get();
-            return snapshot.docs.map(doc => doc.data());
-        }
-        return localTours;
-    },
-
-    getTourById: async (id) => {
-        if (USE_CLOUD) {
-            const doc = await db.collection('tours').doc(id).get();
-            return doc.exists ? doc.data() : undefined;
-        }
-        return localTours.find(t => t.id === id);
-    },
-
-    saveTour: async (tour) => {
-        if (USE_CLOUD) {
-            await db.collection('tours').doc(tour.id).set(tour);
-            return tour;
+        // Ensure uploads directory exists
+        if (!fs.existsSync(this.uploadsDir)) {
+            try {
+                fs.mkdirSync(this.uploadsDir, { recursive: true });
+            } catch (e) {
+                console.error("Could not create uploads dir", e);
+            }
         }
         
-        const index = localTours.findIndex(t => t.id === tour.id);
-        if (index >= 0) {
-            localTours[index] = tour;
+        // Serve static files (only works for non-serverless or persistent disk)
+        if (!this.isServerless) {
+            app.use('/uploads', express.static(this.uploadsDir));
+        }
+
+        // Load initial data
+        if (fs.existsSync(this.dataFile)) {
+            try {
+                this.localTours = JSON.parse(fs.readFileSync(this.dataFile, 'utf8'));
+            } catch (e) { 
+                this.localTours = []; 
+                console.error("Error reading local tours.json", e);
+            }
+        }
+        
+        if (this.isServerless) {
+            console.warn("⚠️  RUNNING IN SERVERLESS MODE WITHOUT CLOUD CONFIG. DATA WILL NOT PERSIST.");
         } else {
-            localTours.push(tour);
+            console.log(`📂 LocalProvider initialized. Data: ${this.dataFile}`);
         }
-        saveLocalData();
-        return tour;
-    },
-
-    deleteTour: async (id) => {
-        if (USE_CLOUD) {
-            await db.collection('tours').doc(id).delete();
-            return;
-        }
-        
-        const initialLen = localTours.length;
-        localTours = localTours.filter(t => t.id !== id);
-        if (localTours.length !== initialLen) saveLocalData();
-    },
-
-    uploadFile: async (file) => {
-        if (USE_CLOUD) {
-            return new Promise((resolve, reject) => {
-                const blob = bucket.file(Date.now() + '-' + file.originalname);
-                const blobStream = blob.createWriteStream({
-                    resumable: false,
-                    contentType: file.mimetype,
-                });
-
-                blobStream.on('error', err => reject(err));
-
-                blobStream.on('finish', () => {
-                    // Assuming bucket is publicly readable or you use signed URLs.
-                    // For a public app, making the bucket public is easiest for reading.
-                    const publicUrl = `https://storage.googleapis.com/${BUCKET_NAME}/${blob.name}`;
-                    resolve(publicUrl);
-                });
-
-                blobStream.end(file.buffer);
-            });
-        }
-
-        // Local URL
-        // Note: When running from backend/server.js, the uploads are relative to that file.
-        // We return an absolute path if possible or relative to root.
-        // For simplicity in this demo, we assume the frontend can reach /uploads
-        return `http://localhost:${PORT}/uploads/${file.filename}`;
     }
-};
 
-// --- Endpoints ---
+    _saveDisk() {
+        if (this.isServerless) {
+             console.warn("⚠️  Cannot save to disk in Serverless environment.");
+             return;
+        }
+        fs.writeFileSync(this.dataFile, JSON.stringify(this.localTours, null, 2));
+    }
 
-app.get('/', (req, res) => res.send(`GeoGuide Backend running in ${USE_CLOUD ? 'CLOUD' : 'LOCAL'} mode`));
+    async getTours() {
+        return this.localTours;
+    }
 
-// Get All
+    async getTour(id) {
+        return this.localTours.find(t => t.id === id);
+    }
+
+    async saveTour(tour) {
+        const index = this.localTours.findIndex(t => t.id === tour.id);
+        if (index >= 0) {
+            this.localTours[index] = tour;
+        } else {
+            this.localTours.push(tour);
+        }
+        this._saveDisk();
+        return tour;
+    }
+
+    async deleteTour(id) {
+        const initialLen = this.localTours.length;
+        this.localTours = this.localTours.filter(t => t.id !== id);
+        if (this.localTours.length !== initialLen) this._saveDisk();
+    }
+
+    async uploadFile(file) {
+        if (this.isServerless) {
+            throw new Error("Local file upload disabled in Serverless mode. Configure Google Cloud.");
+        }
+        const filename = file.filename;
+        return `http://localhost:${PORT}/uploads/${filename}`;
+    }
+}
+
+/**
+ * Strategy 2: Google Cloud Provider
+ * Persists data to Firestore and files to Cloud Storage
+ */
+class CloudProvider {
+    constructor() {
+        this.db = new Firestore({ projectId: PROJECT_ID });
+        this.storage = new Storage({ projectId: PROJECT_ID });
+        this.bucket = this.storage.bucket(BUCKET_NAME);
+        this.collection = this.db.collection('tours');
+        console.log(`☁️  CloudProvider initialized. Project: ${PROJECT_ID}, Bucket: ${BUCKET_NAME}`);
+    }
+
+    async getTours() {
+        const snapshot = await this.collection.get();
+        if (snapshot.empty) return [];
+        return snapshot.docs.map(doc => doc.data());
+    }
+
+    async getTour(id) {
+        const doc = await this.collection.doc(id).get();
+        return doc.exists ? doc.data() : undefined;
+    }
+
+    async saveTour(tour) {
+        // Firestore 'set' acts as an Upsert (Update or Insert)
+        await this.collection.doc(tour.id).set(tour);
+        return tour;
+    }
+
+    async deleteTour(id) {
+        await this.collection.doc(id).delete();
+    }
+
+    async uploadFile(file) {
+        return new Promise((resolve, reject) => {
+            const blob = this.bucket.file(Date.now() + '-' + file.originalname);
+            const blobStream = blob.createWriteStream({
+                resumable: false,
+                contentType: file.mimetype,
+            });
+
+            blobStream.on('error', err => reject(err));
+
+            blobStream.on('finish', () => {
+                // Return the public URL
+                // IMPORTANT: Your bucket must be configured to allow public read access
+                const publicUrl = `https://storage.googleapis.com/${BUCKET_NAME}/${blob.name}`;
+                resolve(publicUrl);
+            });
+
+            blobStream.end(file.buffer);
+        });
+    }
+}
+
+// --- Initialize Provider ---
+
+let dataProvider;
+let uploadMiddleware;
+
+if (USE_CLOUD) {
+    dataProvider = new CloudProvider();
+    // Cloud uses MemoryStorage to hold file in buffer before streaming to GCS
+    uploadMiddleware = multer({ storage: multer.memoryStorage() });
+} else {
+    dataProvider = new LocalProvider();
+    
+    // In Serverless/Vercel (without cloud), we can't write to disk uploads.
+    // We force memory storage to prevent crashes, but uploads won't be savable.
+    if (process.env.VERCEL) {
+        uploadMiddleware = multer({ storage: multer.memoryStorage() });
+    } else {
+        // Local uses DiskStorage to save directly to disk
+        const diskStorage = multer.diskStorage({
+            destination: (req, file, cb) => cb(null, path.join(__dirname, 'uploads')),
+            filename: (req, file, cb) => {
+                const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+                cb(null, uniqueSuffix + path.extname(file.originalname));
+            }
+        });
+        uploadMiddleware = multer({ storage: diskStorage });
+    }
+}
+
+// --- API Routes ---
+
+app.get('/', (req, res) => {
+    res.send(`GeoGuide Backend Running. Mode: ${USE_CLOUD ? '☁️ GOOGLE CLOUD' : '💻 LOCAL FILE SYSTEM'}`);
+});
+
+// GET All Tours
 app.get('/api/tours', async (req, res) => {
     try {
-        const tours = await DAL.getAllTours();
+        const tours = await dataProvider.getTours();
         res.json(tours);
     } catch (e) {
-        console.error(e);
+        console.error("GET /tours error:", e);
         res.status(500).json({ error: e.message });
     }
 });
 
-// Get One
+// GET Single Tour
 app.get('/api/tours/:id', async (req, res) => {
     try {
-        const tour = await DAL.getTourById(req.params.id);
+        const tour = await dataProvider.getTour(req.params.id);
         if (tour) res.json(tour);
-        else res.status(404).json({ message: 'Not found' });
+        else res.status(404).json({ message: 'Tour not found' });
     } catch (e) {
+        console.error(`GET /tours/${req.params.id} error:`, e);
         res.status(500).json({ error: e.message });
     }
 });
 
-// Create / Update
-app.post('/api/tours', async (req, res) => {
+// CREATE (Post) & UPDATE (Put)
+// We treat both similarly here because our Save logic is an Upsert
+const handleSave = async (req, res) => {
     try {
         const tour = req.body;
+        // Ensure ID
         if (!tour.id) tour.id = 'tour-' + Date.now();
-        await DAL.saveTour(tour);
-        res.status(201).json(tour);
+        
+        await dataProvider.saveTour(tour);
+        res.status(200).json(tour);
     } catch (e) {
-        console.error(e);
+        console.error("Save Tour error:", e);
         res.status(500).json({ error: e.message });
     }
-});
+};
 
-app.put('/api/tours/:id', async (req, res) => {
-    try {
-        await DAL.saveTour(req.body);
-        res.json(req.body);
-    } catch (e) {
-        res.status(500).json({ error: e.message });
-    }
-});
+app.post('/api/tours', handleSave);
+app.put('/api/tours/:id', handleSave);
 
-// Delete
+// DELETE Tour
 app.delete('/api/tours/:id', async (req, res) => {
     try {
-        await DAL.deleteTour(req.params.id);
+        await dataProvider.deleteTour(req.params.id);
         res.status(204).send();
     } catch (e) {
+        console.error("DELETE Tour error:", e);
         res.status(500).json({ error: e.message });
     }
 });
 
-// Upload
-app.post('/api/upload', upload.single('file'), async (req, res) => {
-    if (!req.file) return res.status(400).json({ message: 'No file uploaded' });
-    
+// UPLOAD Media
+app.post('/api/upload', uploadMiddleware.single('file'), async (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ message: 'No file uploaded' });
+    }
+
     try {
-        const url = await DAL.uploadFile(req.file);
-        console.log(`File uploaded to: ${url}`);
+        const url = await dataProvider.uploadFile(req.file);
+        console.log(`Media uploaded: ${url}`);
         res.json({ url });
     } catch (e) {
-        console.error("Upload Error:", e);
-        res.status(500).json({ error: 'Upload failed' });
+        console.error("Upload error:", e);
+        res.status(500).json({ error: 'Failed to upload file' });
     }
 });
 
-app.listen(PORT, () => {
-    console.log(`Server listening on port ${PORT}`);
-});
+// Export the app for Vercel/Serverless usage
+module.exports = app;
+
+// Start the server ONLY if run directly (node server.js)
+// This prevents port binding issues when deployed as a serverless function
+if (require.main === module) {
+    app.listen(PORT, () => {
+        console.log(`Server listening on port ${PORT}`);
+    });
+}

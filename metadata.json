@@ -1,0 +1,7 @@
+{
+  "name": "GeoGuide AI",
+  "description": "A smart geo-tour creator and companion app powered by Gemini. Create tours with AI-assisted descriptions and waypoints, or explore them with real-time text-to-speech guides.",
+  "requestFramePermissions": [
+    "geolocation"
+  ]
+}

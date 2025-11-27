@@ -18,6 +18,7 @@ const CreatorPage: React.FC<CreatorPageProps> = ({ user }) => {
   const [userLocation, setUserLocation] = useState<GeoPoint | null>(null);
   const [geoError, setGeoError] = useState<string | null>(null);
   const watchIdRef = useRef<number | null>(null);
+  const kmlInputRef = useRef<HTMLInputElement>(null);
 
   // Load user's tours
   useEffect(() => {
@@ -140,6 +141,83 @@ const CreatorPage: React.FC<CreatorPageProps> = ({ user }) => {
             setCoverUploading(false);
         }
     }
+  };
+
+  // --- KML Import Logic ---
+  const handleImportKml = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    try {
+        const text = await file.text();
+        const parser = new DOMParser();
+        const xmlDoc = parser.parseFromString(text, "text/xml");
+        
+        // Handle parser errors
+        if (xmlDoc.getElementsByTagName("parsererror").length > 0) {
+            throw new Error("Invalid XML/KML file");
+        }
+
+        const placemarks = xmlDoc.getElementsByTagName("Placemark");
+        const newStops: TourStop[] = [];
+
+        for (let i = 0; i < placemarks.length; i++) {
+            const placemark = placemarks[i];
+            
+            // Extract Name
+            const nameNode = placemark.getElementsByTagName("name")[0];
+            const title = nameNode ? nameNode.textContent || "Imported Stop" : "Imported Stop";
+
+            // Extract Description
+            const descNode = placemark.getElementsByTagName("description")[0];
+            // Remove HTML tags from description if present
+            let description = descNode ? descNode.textContent || "" : "";
+            description = description.replace(/<[^>]*>?/gm, '');
+
+            // Extract Coordinates
+            const pointNode = placemark.getElementsByTagName("Point")[0];
+            if (pointNode) {
+                const coordsNode = pointNode.getElementsByTagName("coordinates")[0];
+                if (coordsNode && coordsNode.textContent) {
+                    const coordsRaw = coordsNode.textContent.trim();
+                    // KML is lng,lat,alt
+                    const [lngStr, latStr] = coordsRaw.split(',');
+                    const lat = parseFloat(latStr);
+                    const lng = parseFloat(lngStr);
+
+                    if (!isNaN(lat) && !isNaN(lng)) {
+                        newStops.push({
+                            id: `stop-${Date.now()}-${i}-${Math.random().toString(36).substr(2, 5)}`,
+                            title: title,
+                            description: description.substring(0, 500), // Limit length
+                            location: { lat, lng },
+                            mediaType: MediaType.NONE
+                        });
+                    }
+                }
+            }
+        }
+
+        if (newStops.length > 0) {
+            setEditingTour(prev => {
+                if (!prev) return null;
+                return {
+                    ...prev,
+                    stops: [...prev.stops, ...newStops]
+                };
+            });
+            alert(`Successfully imported ${newStops.length} stops from KML.`);
+        } else {
+            alert("No valid placemarks found in the KML file.");
+        }
+
+    } catch (error) {
+        console.error("KML Parse Error:", error);
+        alert("Failed to parse KML file. Please ensure it is a valid Google Earth KML.");
+    }
+
+    // Reset input
+    if (kmlInputRef.current) kmlInputRef.current.value = '';
   };
 
   // --- Stop Management ---
@@ -303,9 +381,26 @@ const CreatorPage: React.FC<CreatorPageProps> = ({ user }) => {
 
             <div className="flex justify-between items-center">
                 <h3 className="text-xl font-semibold">Stops ({editingTour.stops.length})</h3>
-                <button onClick={addStop} className="text-sm bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded">
-                    <i className="fa-solid fa-plus mr-1"></i> Add Stop
-                </button>
+                <div className="flex space-x-2">
+                    {/* Hidden KML Input */}
+                    <input 
+                        type="file" 
+                        ref={kmlInputRef}
+                        accept=".kml,.xml"
+                        className="hidden"
+                        onChange={handleImportKml}
+                    />
+                    <button 
+                        onClick={() => kmlInputRef.current?.click()} 
+                        className="text-sm bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded text-gray-200 border border-gray-600"
+                        title="Import stops from Google Earth KML file"
+                    >
+                        <i className="fa-solid fa-file-import mr-1"></i> Import KML
+                    </button>
+                    <button onClick={addStop} className="text-sm bg-gray-700 hover:bg-gray-600 px-3 py-1 rounded">
+                        <i className="fa-solid fa-plus mr-1"></i> Add Stop
+                    </button>
+                </div>
             </div>
 
             <div className="space-y-4 max-h-[600px] overflow-y-auto pr-2">

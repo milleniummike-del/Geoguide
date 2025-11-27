@@ -11,6 +11,7 @@
  * PERSISTENCE_MODE: 'FILE' (Default), 'MEMORY', 'FIRESTORE'
  * STORAGE_MODE:     'DISK' (Default), 'GCS' (Google Cloud Storage)
  * 
+ * 
  * AUTOMATIC DETECTION:
  * If GCP_PROJECT_ID is set -> Defaults PERSISTENCE to 'FIRESTORE'
  * If GCS_BUCKET_NAME is set -> Defaults STORAGE to 'GCS'

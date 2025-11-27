@@ -26,7 +26,7 @@ const fs = require('fs');
 const app = express();
 const PORT = process.env.PORT || 443;
 // Variable for local URL construction, defaults to localhost
-const BASE_URL = process.env.BASE_URL || `https://geoguide-456850480610.europe-west1.run.app/:${PORT}`;
+const BASE_URL = process.env.BASE_URL || `https://geoguide-456850480610.europe-west1.run.app/`;
 
 // --- Feature Detection & Configuration ---
 const PROJECT_ID = process.env.GCP_PROJECT_ID;
